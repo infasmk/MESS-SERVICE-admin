@@ -21,7 +21,12 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
   // Pre-load data on mount to minimize waiting time and check connection
   useEffect(() => {
     const checkDb = async () => {
-      await messStore.init();
+      try {
+        await messStore.init();
+      } catch (e) {
+        // Init errors are handled internally in store, but we catch here just in case
+        console.warn("Store init check failed", e);
+      }
       setDbStatus(messStore.isSupabaseConfigured ? 'connected' : 'offline');
     };
     checkDb();
@@ -33,9 +38,18 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
     setIsLoading(true);
 
     try {
+        // CRITICAL: Wait for initialization to complete to know if we are online/offline
+        // This prevents "Failed to fetch" errors if user clicks login before connection check finishes
+        if (messStore.isLoading) {
+            await messStore.init();
+        }
+
+        // Update status in case it changed during init
+        setDbStatus(messStore.isSupabaseConfigured ? 'connected' : 'offline');
+
         if (role === UserRole.ADMIN) {
             // 1. Check Hardcoded Demo Credentials
-            if (identifier === 'admin@messpro.com' && password === 'admin') {
+            if (identifier === 'admin@freshbites.com' && password === 'admin') {
                 onLogin(UserRole.ADMIN, 'admin', 'Mess Administrator');
                 window.location.hash = '/';
                 return;
@@ -44,15 +58,20 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             // 2. Check Supabase (if connected)
             if (messStore.isSupabaseConfigured) {
                 // A. Try Standard Supabase Auth (Users)
-                const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-                    email: identifier,
-                    password: password
-                });
+                try {
+                    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+                        email: identifier,
+                        password: password
+                    });
 
-                if (!authError && authData.user) {
-                    onLogin(UserRole.ADMIN, authData.user.id, authData.user.email || 'Admin');
-                    window.location.hash = '/';
-                    return;
+                    if (!authError && authData.user) {
+                        onLogin(UserRole.ADMIN, authData.user.id, authData.user.email || 'Admin');
+                        window.location.hash = '/';
+                        return;
+                    }
+                } catch (authErr) {
+                    console.warn("Supabase Auth Error:", authErr);
+                    // Don't throw here, try the custom table fallback
                 }
 
                 // B. Try custom 'admins' table (Fallback for manually inserted rows)
@@ -70,14 +89,15 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                          return;
                     }
                 } catch (err) {
-                    // Ignore errors if table doesn't exist
+                    console.warn("Custom Admin Table Error:", err);
+                    // Ignore errors if table doesn't exist or fetch failed
                 }
             }
 
             setError('Invalid Email or Password.');
         } else {
             // Student Login Logic
-            await messStore.init();
+            if (messStore.isLoading) await messStore.init();
 
             // Sanitize input (remove spaces, match string types)
             const cleanPhone = identifier.trim();
@@ -87,8 +107,10 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                 onLogin(UserRole.STUDENT, student.id, student.name);
                 window.location.hash = '/';
             } else {
-                if (messStore.students.length === 0 && dbStatus === 'connected') {
+                if (messStore.students.length === 0 && messStore.isSupabaseConfigured) {
                      setError('Registry is empty. Please ask Admin to add students via dashboard.');
+                } else if (messStore.students.length === 0) {
+                     setError('Demo mode active but no data seeded. Try reloading.');
                 } else {
                      setError(`Phone number "${cleanPhone}" not found.`);
                 }
@@ -138,7 +160,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
            <div className={`w-20 h-20 rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-xl transform rotate-3 hover:rotate-6 transition-all duration-500 ${
                role === UserRole.ADMIN ? 'bg-gradient-to-br from-slate-700 to-slate-900 shadow-slate-300' : 'bg-gradient-to-br from-indigo-600 to-indigo-700 shadow-indigo-300'
            }`}>
-            {role === UserRole.ADMIN ? <Lock className="text-white" size={32} /> : <span className="text-white text-4xl font-bold">M</span>}
+            {role === UserRole.ADMIN ? <Lock className="text-white" size={32} /> : <span className="text-white text-4xl font-bold">F</span>}
           </div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
               {role === UserRole.ADMIN ? 'Admin Console' : 'Welcome Back'}
@@ -167,7 +189,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             <Input
               label={role === UserRole.ADMIN ? "Admin Email" : "Registered Phone Number"}
               type={role === UserRole.ADMIN ? "email" : "tel"}
-              placeholder={role === UserRole.ADMIN ? "admin@messpro.com" : "10-digit mobile number"}
+              placeholder={role === UserRole.ADMIN ? "admin@freshbites.com" : "10-digit mobile number"}
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
               required
