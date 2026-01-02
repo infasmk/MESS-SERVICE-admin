@@ -204,7 +204,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             </Button>
           </form>
 
-<<<<<<< HEAD
           {/* Discreet Role Switcher */}
           <div className="mt-8 pt-6 border-t border-slate-100 text-center">
              {role === UserRole.ADMIN ? (
@@ -224,8 +223,6 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                  </button>
              )}
           </div>
-=======
->>>>>>> 659e5f380586f1095ba6bde0a268e9187e4e79d2
         </div>
       </div>
     </div>
