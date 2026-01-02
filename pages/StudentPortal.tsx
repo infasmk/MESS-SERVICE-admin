@@ -1,10 +1,9 @@
 import React, { useState, useReducer, useEffect } from 'react';
 import { CurrentUser } from '../types.ts';
 import { messStore } from '../store/messStore.ts';
-import { initiatePayment } from '../services/payment.ts';
-import { Card, Button, Badge } from '../components/UI.tsx';
+import { Card, Button, Badge, Modal, Input } from '../components/UI.tsx';
 import { formatCurrency, formatDate } from '../utils/helpers.ts';
-import { ArrowUpRight, History, Calendar, CheckCircle, AlertTriangle, ShieldCheck } from 'lucide-react';
+import { History, Calendar, CheckCircle, AlertTriangle, ShieldCheck, QrCode, Copy, Smartphone, Check, Clock, Loader2, Sparkles } from 'lucide-react';
 
 interface StudentPortalProps {
   user: CurrentUser;
@@ -13,75 +12,105 @@ interface StudentPortalProps {
 const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   // Use a reducer to force update since the store isn't reactive by default
   const [refreshKey, forceUpdate] = useReducer((x) => x + 1, 0);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load data on mount to ensure data exists after reload
+  useEffect(() => {
+    const loadData = async () => {
+        setIsLoading(true);
+        try {
+            await messStore.init();
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+    loadData();
+  }, []);
 
   // Data fetching (runs on every render/refreshKey change)
   const balance = messStore.getStudentBalance(user.id);
   const assignments = messStore.getStudentAssignments(user.id);
   const payments = messStore.getStudentPayments(user.id);
   const activeAssignment = assignments.find(a => a.status === 'active');
-  const studentProfile = messStore.students.find(s => s.id === user.id);
 
   // Local state
   const [payAmount, setPayAmount] = useState(balance > 0 ? balance.toString() : '500');
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [errorMessage, setErrorMessage] = useState('');
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [transactionId, setTransactionId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [validationError, setValidationError] = useState('');
 
-  // Update input amount when balance changes (e.g. after a payment)
+  // Update input amount when balance changes
   useEffect(() => {
     if (balance > 0) {
       setPayAmount(balance.toString());
     } else {
       setPayAmount(''); 
     }
-  }, [balance, refreshKey]);
+  }, [balance, refreshKey, isLoading]);
 
-  const handlePayment = async () => {
-    // Payment Logic temporarily disabled
-    return;
+  // --- UPI CONFIGURATION ---
+  const ADMIN_UPI_ID = "ifu.infas-1@okicici"; 
+  const ADMIN_NAME = "MessPro Hostel Admin";
+  
+  // Construct UPI Link: upi://pay?pa=...&pn=...&am=...&cu=INR
+  const upiLink = `upi://pay?pa=${ADMIN_UPI_ID}&pn=${encodeURIComponent(ADMIN_NAME)}&am=${payAmount}&cu=INR&tn=MessFee-${user.name}`;
+  
+  // Generate QR Code URL (Using free API for demo purposes)
+  const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(upiLink)}`;
 
-    /* 
-    setErrorMessage('');
-    const amount = parseFloat(payAmount);
+  const handleCopyUpi = () => {
+    navigator.clipboard.writeText(ADMIN_UPI_ID);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
-    if (isNaN(amount) || amount <= 0) {
-      setErrorMessage("Please enter a valid amount greater than 0.");
-      return;
+  const handleManualPaymentSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setValidationError('');
+    
+    const cleanTrxId = transactionId.trim();
+
+    if (!cleanTrxId) return;
+
+    // VALIDATION 1: UPI UTR must be exactly 12 digits
+    const utrRegex = /^\d{12}$/;
+    if (!utrRegex.test(cleanTrxId)) {
+        setValidationError("Invalid Format: UPI Reference Numbers must be exactly 12 digits (numeric only). Please check your payment app history.");
+        return;
     }
 
-    setIsProcessing(true);
+    setIsSubmitting(true);
+    const amount = parseFloat(payAmount);
 
-    await initiatePayment({
-      amount: amount,
-      studentName: user.name,
-      studentPhone: studentProfile?.phone || '',
-      description: `Mess Bill Payment - ${user.name}`,
-      onSuccess: (response) => {
-        // 1. Record in Store (Client-side Demo Logic)
-        // In Prod: Store is updated via Webhook or Backend confirmation
-        messStore.recordPayment({
-          student_id: user.id,
-          amount: amount,
-          date: new Date().toISOString(),
-          mode: 'online',
-          transaction_id: response.razorpay_payment_id
+    // Simulate API delay
+    await new Promise(resolve => setTimeout(resolve, 800));
+
+    try {
+        // Record payment in store as PENDING
+        await messStore.recordPayment({
+            student_id: user.id,
+            amount: amount,
+            date: new Date().toISOString(),
+            mode: 'upi', 
+            transaction_id: cleanTrxId,
+            notes: 'Manual User Submission',
+            status: 'pending' // Important: Mark as pending for Admin approval
         });
 
-        setIsProcessing(false);
-        
-        // 2. Force re-render to update balance and history immediately
-        forceUpdate();
+        setIsPaymentModalOpen(false);
+        setTransactionId('');
+        forceUpdate(); // Update UI
+        alert("Payment Recorded! Admin will verify the Transaction ID shortly.");
 
-        // 3. Show success message
-        alert(`Payment Successful! \nRef: ${response.razorpay_payment_id}`);
-      },
-      onFailure: (error) => {
-        setIsProcessing(false);
-        if (error.message !== "Payment cancelled by user.") {
-           setErrorMessage(error.message || "Payment failed. Please try again.");
-        }
-      }
-    });
-    */
+    } catch (error: any) {
+        setValidationError(error.message);
+    } finally {
+        setIsSubmitting(false);
+    }
   };
 
   // Helper to calculate days remaining safely
@@ -97,11 +126,35 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
   };
 
   const daysRemaining = activeAssignment ? getDaysRemaining(activeAssignment.end_date) : -999;
-  // Show warning if 2 days or less remain AND strictly not expired (days >= 0)
   const showExpiryWarning = activeAssignment && daysRemaining <= 2 && daysRemaining >= 0;
+
+  if (isLoading) {
+      return (
+          <div className="flex flex-col items-center justify-center min-h-[50vh]">
+              <Loader2 className="animate-spin text-indigo-600 mb-2" size={32} />
+              <p className="text-slate-500 font-medium">Loading your portal...</p>
+          </div>
+      );
+  }
 
   return (
     <div className="space-y-6">
+      
+      {/* Welcome Banner */}
+      <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 rounded-3xl p-6 text-white shadow-lg shadow-indigo-200 relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none"></div>
+          <div className="relative z-10">
+              <div className="flex items-center gap-2 mb-2 opacity-90">
+                  <Sparkles size={18} className="text-yellow-300" />
+                  <span className="text-sm font-semibold tracking-wide uppercase">Welcome Back</span>
+              </div>
+              <h1 className="text-3xl font-bold mb-1">Hi, {user.name}</h1>
+              <p className="text-indigo-100 max-w-lg text-sm leading-relaxed">
+                  Hope you're having a great day! Check your meal plan status and manage your payments below.
+              </p>
+          </div>
+      </div>
+
       {/* Expiry Warning Banner */}
       {showExpiryWarning && (
         <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-4 shadow-sm animate-fade-in relative overflow-hidden">
@@ -152,31 +205,27 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
                       type="number" 
                       value={payAmount} 
                       onChange={e => setPayAmount(e.target.value)} 
+                      min="1"
+                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:ring-2 focus:ring-indigo-500 focus:border-transparent font-bold disabled:opacity-50"
                       disabled={true}
-                      className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white/50 cursor-not-allowed focus:ring-0 focus:border-slate-700 font-bold"
                      />
                    </div>
                    <div className="flex items-end">
                      <Button 
-                      variant="secondary" 
-                      onClick={handlePayment} 
+                      variant="primary" 
+                      onClick={() => {}} // Disabled action
                       disabled={true}
-                      className="h-[42px] px-6 bg-slate-700 border-slate-600 text-slate-400 cursor-not-allowed shadow-none"
+                      className="h-[42px] px-6 shadow-none !bg-slate-700 !border-slate-600 !text-slate-400 cursor-not-allowed"
+                      title="Online payments are currently disabled. Please pay in cash to Admin."
                      >
-                        <span>Payments Disabled</span>
+                        <span>Disabled</span>
                      </Button>
                    </div>
                  </div>
                  
-                 {errorMessage && (
-                    <p className="text-rose-400 text-xs font-medium bg-rose-500/10 p-2 rounded border border-rose-500/20">
-                      {errorMessage}
-                    </p>
-                 )}
-                 
                  <div className="flex items-center gap-1.5 text-[10px] text-slate-500 justify-center opacity-70">
-                    <ShieldCheck size={12} className="text-emerald-500" />
-                    <span>Secured by Razorpay</span>
+                    <ShieldCheck size={12} className="text-slate-600" />
+                    <span>Pay at Office</span>
                  </div>
                </div>
             </div>
@@ -244,26 +293,44 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
               <tr>
                 <th className="px-4 py-3 font-medium">Date</th>
                 <th className="px-4 py-3 font-medium">Mode</th>
+                <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Transaction ID</th>
                 <th className="px-4 py-3 font-medium text-right">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {payments.length === 0 ? (
-                 <tr><td colSpan={4} className="p-4 text-center text-slate-500">No payments found.</td></tr>
+                 <tr><td colSpan={5} className="p-4 text-center text-slate-500">No payments found.</td></tr>
               ) : (
                 payments.map(p => (
                   <tr key={p.id}>
                     <td className="px-4 py-3 text-slate-700">{formatDate(p.date)}</td>
                     <td className="px-4 py-3">
                       <span className={`capitalize px-2 py-0.5 rounded text-xs border ${
-                        p.mode === 'online' ? 'bg-indigo-50 border-indigo-100 text-indigo-700' : 'bg-slate-50 border-slate-200 text-slate-600'
+                        p.mode === 'online' ? 'bg-indigo-50 border-indigo-100 text-indigo-700' : 
+                        p.mode === 'upi' ? 'bg-emerald-50 border-emerald-100 text-emerald-700' :
+                        'bg-slate-50 border-slate-200 text-slate-600'
                       }`}>
-                        {p.mode}
+                        {p.mode === 'upi' ? 'UPI' : p.mode}
                       </span>
                     </td>
+                    <td className="px-4 py-3">
+                        {p.status === 'verified' ? (
+                            <span className="flex items-center gap-1 text-xs text-emerald-600 font-medium">
+                                <CheckCircle size={12} /> Verified
+                            </span>
+                        ) : p.status === 'rejected' ? (
+                            <span className="flex items-center gap-1 text-xs text-rose-600 font-medium">
+                                <AlertTriangle size={12} /> Rejected
+                            </span>
+                        ) : (
+                            <span className="flex items-center gap-1 text-xs text-amber-600 font-medium">
+                                <Clock size={12} /> Pending
+                            </span>
+                        )}
+                    </td>
                     <td className="px-4 py-3 text-slate-500 font-mono text-xs">{p.transaction_id || '-'}</td>
-                    <td className="px-4 py-3 text-right font-medium text-emerald-600">+{formatCurrency(p.amount)}</td>
+                    <td className="px-4 py-3 text-right font-medium text-slate-900">{formatCurrency(p.amount)}</td>
                   </tr>
                 ))
               )}
@@ -271,6 +338,91 @@ const StudentPortal: React.FC<StudentPortalProps> = ({ user }) => {
           </table>
         </div>
       </Card>
+
+      {/* UPI Payment Modal (Code Kept but Unreachable) */}
+      <Modal 
+        isOpen={isPaymentModalOpen} 
+        onClose={() => {setIsPaymentModalOpen(false); setValidationError('');}} 
+        title="Pay via UPI"
+      >
+        <div className="space-y-6">
+            {/* Step 1: Scan or Click */}
+            <div className="flex flex-col items-center justify-center p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-200 mb-4">
+                    <img 
+                        src={qrCodeUrl} 
+                        alt="UPI QR Code" 
+                        className="w-40 h-40 object-contain" 
+                    />
+                </div>
+                
+                <p className="text-sm font-medium text-slate-600 mb-3">Scan with GPay, PhonePe, or Paytm</p>
+                
+                <div className="flex flex-col w-full gap-2">
+                    {/* Mobile Deep Link Button */}
+                    <a 
+                        href={upiLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center justify-center gap-2 w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-semibold shadow-md shadow-indigo-200 transition-all active:scale-95"
+                    >
+                        <Smartphone size={16} />
+                        Tap to Open UPI App
+                    </a>
+
+                    {/* Copy UPI ID */}
+                    <button 
+                        onClick={handleCopyUpi}
+                        className="flex items-center justify-center gap-2 w-full py-2 bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 rounded-xl text-xs font-medium transition-colors"
+                    >
+                        {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                        {copied ? 'Copied!' : `Copy ID: ${ADMIN_UPI_ID}`}
+                    </button>
+                </div>
+            </div>
+
+            {/* Step 2: Verify */}
+            <form onSubmit={handleManualPaymentSubmit} className="space-y-4 pt-4 border-t border-slate-100">
+                <div>
+                    <h4 className="text-sm font-bold text-slate-900 mb-1">Verify Payment</h4>
+                    <p className="text-xs text-slate-500 mb-3">After paying, paste the 12-digit UPI Reference Number below.</p>
+                    <Input 
+                        placeholder="e.g. 334512345678" 
+                        value={transactionId} 
+                        onChange={(e) => {
+                            setTransactionId(e.target.value);
+                            setValidationError('');
+                        }}
+                        required
+                        label="Transaction Ref No / UTR"
+                        maxLength={12}
+                    />
+                </div>
+                
+                {validationError && (
+                    <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg flex gap-2 items-start text-xs text-rose-600">
+                        <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                        <span>{validationError}</span>
+                    </div>
+                )}
+
+                <div className="bg-blue-50 p-3 rounded-lg flex gap-2 items-start">
+                    <CheckCircle className="text-blue-600 shrink-0 mt-0.5" size={16} />
+                    <p className="text-xs text-blue-700">
+                        Paying <span className="font-bold">{formatCurrency(parseFloat(payAmount))}</span>. Admin will verify this transaction ID against the bank statement.
+                    </p>
+                </div>
+
+                <Button 
+                    type="submit" 
+                    className="w-full"
+                    disabled={isSubmitting || !transactionId.trim()}
+                >
+                    {isSubmitting ? 'Verifying...' : 'Submit Payment Details'}
+                </Button>
+            </form>
+        </div>
+      </Modal>
     </div>
   );
 };
