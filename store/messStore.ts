@@ -1,3 +1,4 @@
+
 import { Student, MealPlan, Assignment, Payment, KPIStats, ActivityLog } from '../types.ts';
 import { generateId, calculateProratedCharge, getDerivedStatus } from '../utils/helpers.ts';
 import { supabase } from '../services/supabaseClient.ts';
@@ -15,9 +16,9 @@ class MessStore {
     this.init();
   }
 
-  async init() {
-    // Return existing promise if already loading to prevent race conditions
-    if (this.isLoading && this.initPromise) return this.initPromise;
+  async init(force = false) {
+    // Return existing promise if already loading to prevent race conditions, unless forced
+    if (!force && this.isLoading && this.initPromise) return this.initPromise;
 
     this.isLoading = true;
     
@@ -53,7 +54,11 @@ class MessStore {
     this.students = (studentsRes.data || []).map(s => ({...s, phone: String(s.phone)}));
     this.plans = plansRes.data || [];
     this.assignments = assignmentsRes.data || [];
-    this.payments = paymentsRes.data || [];
+    // Ensure status exists (backward compatibility)
+    this.payments = (paymentsRes.data || []).map(p => ({
+        ...p,
+        status: p.status || 'verified'
+    }));
   }
 
   private loadFromLocal() {
@@ -63,7 +68,10 @@ class MessStore {
       this.students = parsed.students || [];
       this.plans = parsed.plans || [];
       this.assignments = parsed.assignments || [];
-      this.payments = parsed.payments || [];
+      this.payments = (parsed.payments || []).map((p: any) => ({
+          ...p,
+          status: p.status || 'verified'
+      }));
     }
     
     // If no data exists (first run without Supabase), seed with Demo Data
@@ -108,7 +116,10 @@ class MessStore {
 
   getStats(): KPIStats {
     const totalAssignedCharges = this.assignments.reduce((sum, a) => sum + Number(a.charge), 0);
-    const totalCollected = this.payments.reduce((sum, p) => sum + Number(p.amount), 0);
+    // Only count VERIFIED payments in collections
+    const totalCollected = this.payments
+        .filter(p => p.status === 'verified')
+        .reduce((sum, p) => sum + Number(p.amount), 0);
     
     // Filter for actual overdue (Expired plan with balance)
     const overdueList = this.getStudentsWithDues().filter(s => {
@@ -132,8 +143,9 @@ class MessStore {
       .filter(a => a.student_id === studentId)
       .reduce((sum, a) => sum + Number(a.charge), 0);
       
+    // Only Verified payments count towards reducing balance
     const totalPaid = this.payments
-      .filter(p => p.student_id === studentId)
+      .filter(p => p.student_id === studentId && p.status === 'verified')
       .reduce((sum, p) => sum + Number(p.amount), 0);
 
     return totalCharges - totalPaid;
@@ -145,6 +157,12 @@ class MessStore {
 
   getStudentPayments(studentId: string) {
     return this.payments.filter(p => p.student_id === studentId).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }
+
+  getPendingPayments() {
+      return this.payments
+        .filter(p => p.status === 'pending')
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }
 
   getStudentsWithDues() {
@@ -164,14 +182,16 @@ class MessStore {
     // Add Payments
     this.payments.forEach(p => {
         const student = this.students.find(s => s.id === p.student_id);
-        activities.push({
-            id: p.id,
-            type: 'payment',
-            title: `Payment Received`,
-            description: `${student?.name || 'Unknown'} paid via ${p.mode}`,
-            amount: p.amount,
-            date: p.date
-        });
+        if (p.status === 'verified') {
+            activities.push({
+                id: p.id,
+                type: 'payment',
+                title: `Payment Received`,
+                description: `${student?.name || 'Unknown'} paid via ${p.mode}`,
+                amount: p.amount,
+                date: p.date
+            });
+        }
     });
 
     // Add Registrations
@@ -329,22 +349,79 @@ class MessStore {
   }
 
   async recordPayment(payment: Omit<Payment, 'id'>) {
+    // Default to verified if not specified (for admin actions), but respect provided status (for student actions)
+    const paymentStatus = payment.status || 'verified';
+    
+    // Check for duplicate transaction ID locally first (faster feedback)
+    if (payment.transaction_id) {
+        const isDuplicate = this.payments.some(p => p.transaction_id === payment.transaction_id);
+        if (isDuplicate) {
+            throw new Error(`Transaction ID '${payment.transaction_id}' has already been submitted.`);
+        }
+    }
+
     if (this.isSupabaseConfigured) {
+      // Secondary check against Database for duplicates to avoid constraint error crashing the UI
+      if (payment.transaction_id) {
+          const { data: existing } = await supabase
+              .from('payments')
+              .select('id')
+              .eq('transaction_id', payment.transaction_id)
+              .maybeSingle();
+          
+          if (existing) {
+              throw new Error(`Transaction ID '${payment.transaction_id}' already exists in the system.`);
+          }
+      }
+
       const { data, error } = await supabase.from('payments').insert([{
         student_id: payment.student_id,
         amount: payment.amount,
         date: payment.date,
         mode: payment.mode,
-        transaction_id: payment.transaction_id
+        transaction_id: payment.transaction_id,
+        status: paymentStatus
       }]).select().single();
 
-      if (error) throw error;
+      if (error) {
+        // Explicitly check for column missing error which happens when schema is outdated
+        if (error.message && (error.message.includes('status') || error.message.includes('column'))) {
+            throw new Error("Database Error: The 'status' column is missing in 'payments' table. Please ask Admin to run the update SQL.");
+        }
+        // Check for unique constraint violation (code 23505 in Postgres)
+        if (error.code === '23505') {
+            throw new Error("This Transaction ID has already been used.");
+        }
+        throw error;
+      }
       this.payments.unshift(data);
     } else {
-      const newPayment: Payment = { ...payment, id: `pay_${generateId()}` };
+      const newPayment: Payment = { ...payment, status: paymentStatus, id: `pay_${generateId()}` };
       this.payments.unshift(newPayment);
       this.persistLocal();
     }
+  }
+
+  async verifyPayment(paymentId: string) {
+      if (this.isSupabaseConfigured) {
+          const { error } = await supabase.from('payments').update({ status: 'verified' }).eq('id', paymentId);
+          if (error) throw error;
+      }
+      
+      const idx = this.payments.findIndex(p => p.id === paymentId);
+      if (idx !== -1) {
+          this.payments[idx].status = 'verified';
+          if (!this.isSupabaseConfigured) this.persistLocal();
+      }
+  }
+
+  async rejectPayment(paymentId: string) {
+      if (this.isSupabaseConfigured) {
+          const { error } = await supabase.from('payments').delete().eq('id', paymentId);
+          if (error) throw error;
+      }
+      this.payments = this.payments.filter(p => p.id !== paymentId);
+      if (!this.isSupabaseConfigured) this.persistLocal();
   }
 
   async updateLastReminder(studentId: string) {
