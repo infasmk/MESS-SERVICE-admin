@@ -9,14 +9,14 @@
   "orientation": "portrait",
   "icons": [
     {
-      "src": "https://i.ibb.co/rRPBfH2Y/freshbites.jpg",
+      "src": "https://cdn-icons-png.flaticon.com/512/1535/1535019.png",
       "sizes": "192x192",
-      "type": "image/jpg"
+      "type": "image/png"
     },
     {
-      "src": "https://i.ibb.co/rRPBfH2Y/freshbites.jpg",
+      "src": "https://cdn-icons-png.flaticon.com/512/1535/1535019.png",
       "sizes": "512x512",
-      "type": "image/jpg"
+      "type": "image/png"
     }
   ]
 }
